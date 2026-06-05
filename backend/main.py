@@ -76,7 +76,7 @@ async def process_excel_task(job_id: str, source: str, contents: bytes):
         import random
         
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-setuid-sandbox", "--single-process"])
             
             # --- CONCURRENCY CONTROL ---
             # Max 8 concurrent searches to balance speed and bot detection
@@ -162,7 +162,7 @@ async def single_search(source: str = Form(...), name: str = Form(...), brand: s
     import random
     
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-setuid-sandbox", "--single-process"])
         ua = random.choice(USER_AGENTS)
         context = await browser.new_context(user_agent=ua)
         
