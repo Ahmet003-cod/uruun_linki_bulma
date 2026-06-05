@@ -59,10 +59,51 @@ Uygulama, toplu işlemlerde "İki Aşamalı" bir strateji izler:
 
 ---
 
-## 🚀 Çalıştırma
+## 🚀 Kurulum ve Çalıştırma (GitHub'dan İndirenler İçin)
 
-Projenin kök dizininde aşağıdaki komutu kullanarak hem backend'i hem de frontend'i aynı anda başlatabilirsiniz:
+Projeyi bilgisayarınıza indirip çalıştırmak için aşağıdaki adımları sırasıyla uygulayın.
+
+### 1. Gereksinimler
+Bilgisayarınızda şunların kurulu olduğundan emin olun:
+- **Python** (3.8 veya üzeri)
+- **Node.js** (v14 veya üzeri)
+- **Git**
+
+### 2. Projeyi İndirin
+Terminal veya Komut Satırını açıp projeyi klonlayın ve klasöre girin:
+```bash
+git clone https://github.com/Ahmet003-cod/uruun_linki_bulma.git
+cd uruun_linki_bulma
+```
+
+### 3. Kök Dizin Kurulumu
+Projeyi aynı anda çalıştırmak için gerekli aracı (`concurrently`) kurun:
+```bash
+npm install
+```
+
+### 4. Backend (Arka Plan) Kurulumu
+Python kütüphanelerini ve Playwright tarayıcısını kurun:
+```bash
+cd backend
+pip install -r requirements.txt
+playwright install chromium
+cd ..
+```
+
+### 5. Frontend (Arayüz) Kurulumu
+Arayüz için gerekli paketleri kurun:
+```bash
+cd frontend
+npm install
+cd ..
+```
+
+### 6. Uygulamayı Başlatma
+Tüm kurulumlar tamamlandıktan sonra, projenin ana klasöründe (kök dizinde) şu komutu çalıştırarak hem arka planı hem de arayüzü aynı anda başlatabilirsiniz:
 
 ```bash
-npm start
+npm run start
 ```
+
+Tarayıcınızda otomatik olarak (genellikle `http://localhost:3000`) açılacaktır. Eğer açılmazsa terminaldeki adresi tarayıcınıza yapıştırın.
