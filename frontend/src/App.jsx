@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import axios from 'axios';
 import { Upload, FileSpreadsheet, Search, CheckCircle2, AlertCircle, Loader2, Download } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+const API_BASE = import.meta.env.DEV ? '/api' : 'https://url-bulma1.onrender.com';
 
 function App() {
   const [source, setSource] = useState('akakce');
@@ -53,7 +54,7 @@ function App() {
     formData.append('source', source);
 
     try {
-      const response = await axios.post('/api/upload', formData, {
+      const response = await axios.post(`${API_BASE}/upload`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
 
@@ -63,7 +64,7 @@ function App() {
         // Start polling
         const pollInterval = setInterval(async () => {
           try {
-            const statusRes = await axios.get(`/api/status/${jobId}`);
+            const statusRes = await axios.get(`${API_BASE}/status/${jobId}`);
             const { status, progress, total, fileId, error: jobError } = statusRes.data;
             
             if (total > 0) {
@@ -101,7 +102,7 @@ function App() {
   const [processingInfo, setProcessingInfo] = useState({ progress: 0, total: 0 });
 
   const downloadResult = () => {
-    window.open(`/api/download/${resultFileId}`, '_blank');
+    window.open(`${API_BASE}/download/${resultFileId}`, '_blank');
   };
 
   const handleManualSearch = async (e) => {
@@ -118,7 +119,7 @@ function App() {
     formData.append('brand', manualBrand);
 
     try {
-      const response = await axios.post('/api/search', formData);
+      const response = await axios.post(`${API_BASE}/search`, formData);
       if (response.data.success) {
         setManualResult(response.data.url);
       } else {
