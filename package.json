@@ -1,0 +1,12 @@
+{
+  "name": "hausport-root",
+  "version": "1.0.0",
+  "description": "Root control for Hausport project",
+  "scripts": {
+    "start": "concurrently \"cd backend && python main.py\" \"cd frontend && npm run dev\"",
+    "install:all": "cd frontend && npm install && cd ../backend && pip install -r requirements.txt"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

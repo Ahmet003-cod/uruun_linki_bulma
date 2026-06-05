@@ -6,7 +6,18 @@ import pandas as pd
 import io
 import uuid
 import asyncio
-from scraper import search_product, async_playwright
+import sys
+import io
+from scraper import search_product, async_playwright, safe_log, cleanup_text
+
+# Force UTF-8 encoding on Windows to avoid 'charmap' errors
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 app = FastAPI()
 
@@ -58,7 +69,7 @@ async def process_excel_task(job_id: str, source: str, contents: bytes):
         jobs[job_id]["total"] = total_rows
         
         url_col_name = "AkakceUrl" if source.lower() == "akakce" else "CimriUrl"
-        urls = []
+        df[url_col_name] = "Bulunamadı"
         
         # Start Playwright once for the entire batch
         from scraper import USER_AGENTS
@@ -67,37 +78,71 @@ async def process_excel_task(job_id: str, source: str, contents: bytes):
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             
+            # --- CONCURRENCY CONTROL ---
+            # Max 8 concurrent searches to balance speed and bot detection
+            MAX_CONCURRENT = 8
+            semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+            
+            async def process_row_task(index, row, pass_num=1):
+                async with semaphore:
+                    context = None
+                    try:
+                        name = str(row[name_col])
+                        brand = str(row[brand_col]) if brand_col and pd.notna(row[brand_col]) else ""
+                        
+                        ua = random.choice(USER_AGENTS)
+                        context = await browser.new_context(user_agent=ua)
+                        
+                        # Search logic
+                        lenient = (pass_num == 2)
+                        url = await search_product(source, name, brand, context, lenient=lenient)
+                        
+                        df.at[index, url_col_name] = url if url else "Bulunamadı"
+                        
+                        # Small delay to look human even within concurrency
+                        await asyncio.sleep(random.uniform(1.0, 2.0))
+                    except Exception as row_error:
+                        safe_log(f"Error processing row {index}: {row_error}")
+                        df.at[index, url_col_name] = "Hata"
+                    finally:
+                        if context:
+                            await context.close()
+                        # Increment progress
+                        jobs[job_id]["progress"] += 1
+
+            # --- PASS 1: INITIAL SEARCH ---
+            safe_log(f"Job {job_id}: Starting PASS 1 for {total_rows} products (Concurrency: {MAX_CONCURRENT})")
+            tasks = []
             for index, row in df.iterrows():
-                try:
-                    name = str(row[name_col])
-                    brand = str(row[brand_col]) if brand_col and pd.notna(row[brand_col]) else ""
-                    
-                    # Create a FRESH context for EVERY search to rotate User-Agent
-                    ua = random.choice(USER_AGENTS)
-                    context = await browser.new_context(user_agent=ua)
-                    
-                    # Call search_product - passing the fresh context
-                    # The search_product function handles duplication check internally
-                    url = await search_product(source, name, brand, context)
-                    urls.append(url if url else "Bulunamadı")
-                    
-                    # Clean up context immediately
-                    await context.close()
-                except Exception as row_error:
-                    print(f"Error processing row {index}: {row_error}")
-                    urls.append("Hata")
+                tasks.append(process_row_task(index, row, pass_num=1))
+            
+            await asyncio.gather(*tasks)
+
+            # --- REORDER: Move failures to the end ---
+            failed_mask = df[url_col_name].isin(["Bulunamadı", "Hata"])
+            success_df = df[~failed_mask]
+            failed_df = df[failed_mask]
+            
+            # Combine them: Successful ones first, failed ones at the end
+            df = pd.concat([success_df, failed_df]).reset_index(drop=True)
+            
+            # --- PASS 2: RETRY FOR FAILED ONES ---
+            retry_rows = df[df[url_col_name].isin(["Bulunamadı", "Hata"])]
+            num_retries = len(retry_rows)
+            
+            if num_retries > 0:
+                safe_log(f"Job {job_id}: Starting PASS 2 (Retry) for {num_retries} failed products")
                 
-                # Update progress
-                jobs[job_id]["progress"] = index + 1
+                # Update total for the job to include retries
+                jobs[job_id]["total"] = total_rows + num_retries
                 
-                # Delay to look more human and avoid rate limits
-                # Slightly longer for bulk to be safer
-                await asyncio.sleep(random.uniform(0.8, 2.0))
+                retry_tasks = []
+                for index, row in retry_rows.iterrows():
+                    retry_tasks.append(process_row_task(index, row, pass_num=2))
+                
+                await asyncio.gather(*retry_tasks)
             
             await browser.close()
-
-            
-        df[url_col_name] = urls
         
         # Save to temp file
         file_path = os.path.join(UPLOAD_DIR, f"{job_id}.xlsx")
@@ -107,7 +152,7 @@ async def process_excel_task(job_id: str, source: str, contents: bytes):
         jobs[job_id]["fileId"] = f"{job_id}.xlsx"
         
     except Exception as e:
-        print(f"Error processing job {job_id}: {e}")
+        safe_log(f"Error processing job {job_id}: {e}")
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["error"] = str(e)
 
@@ -129,7 +174,9 @@ async def single_search(source: str = Form(...), name: str = Form(...), brand: s
             return {"success": False, "message": "Ürün bulunamadı."}
         except Exception as e:
             await browser.close()
-            return {"success": False, "message": f"Arama hatası: {str(e)}"}
+            # Ensure the error message string doesn't contain the problematic characters either
+            safe_error = str(e).encode('ascii', 'replace').decode('ascii')
+            return {"success": False, "message": f"Arama hatası: {safe_error}"}
 
 
 @app.post("/upload")

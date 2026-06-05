@@ -4,8 +4,32 @@ import urllib.parse
 from thefuzz import fuzz
 import re
 import random
+import unicodedata
+import sys
+import io
 
-# Negative keywords to prevent machine vs accessory/spare part mismatch
+# Ensure UTF-8 on Windows for prints
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
+def safe_log(message):
+    try:
+        print(message)
+    except:
+        pass
+
+def cleanup_text(text):
+    if not isinstance(text, str): return text
+    text = unicodedata.normalize('NFC', text)
+    text = text.replace('\u0307', '')
+    text = text.replace('İ', 'i').replace('I', 'ı').lower()
+    return text.strip()
+
 NEGATIVES = [
     "torba", "filtre", "hortum", "aksesuar", "yedek parça", "batarya", 
     "şarj cihazı", "kablo", "uç set", "mandren", "adaptör", "kağıt", 
@@ -14,7 +38,6 @@ NEGATIVES = [
     "şanzıman", "dişli", "segman", "yağ", "yakıt", "karbüratör", "motoru değil"
 ]
 
-# User-Agent pool for bot evasion
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
@@ -24,393 +47,258 @@ USER_AGENTS = [
 ]
 
 def clean_name(name):
-    """Removes common technical suffixes to find the base model."""
     suffixes = [
         r"taşıma çantalı", r"çantalı", r"solo", r"akülü", r"vidalama", 
         r"kırıcı-delici", r"zımba çakma", r"çivi ve", r"şarjlı", r"li-ion",
         r"li-i", r"li", r"-\d+v", r"\d+v", r"18v", r"12v", r"36v", r"54v"
     ]
     cleaned = name.lower()
-    for s in suffixes:
-        cleaned = re.sub(s, "", cleaned)
+    for s in suffixes: cleaned = re.sub(s, "", cleaned)
     return cleaned.strip()
 
-async def human_delay(min_ms=500, max_ms=1500):
-    """Adds a random delay to mimic human behavior."""
-    delay = random.randint(min_ms, max_ms) / 1000.0
-    await asyncio.sleep(delay)
+def normalize_match_text(text):
+    if not text: return ""
+    text = text.lower()
+    # Preserve dots and commas for decimal numbers (4.0, 5,5 etc)
+    text = re.sub(r'[^a-z0-9\s\.,]', ' ', text)
+    # Turkish char normalization
+    replacements = {'ı': 'i', 'ğ': 'g', 'ü': 'u', 'ş': 's', 'ö': 'o', 'ç': 'c'}
+    for k, v in replacements.items(): text = text.replace(k, v)
+    return text
 
-def find_best_match(query, brand, candidates, threshold=50, force_tech_match=False):
+def find_best_match(query, brand, candidates, threshold=80):
     """
-    Finds the best matching candidate's URL.
+    INTELLIGENT ACCURACY MODE:
+    - Every word in query MUST be in title (except ignored).
+    - Every significant number in query MUST be in title.
+    - Technical specs (V, Ah, Watt) MUST match exactly.
+    - Brand MUST be present.
     """
-    if not candidates:
-        return None
+    if not candidates: return None
+    
+    clean_query = query.lower().strip()
+    norm_query = normalize_match_text(clean_query)
+    
+    # --- MODEL CODE EXTRACTION ---
+    MODEL_KEYWORDS = {"m", "l", "xl", "xxl", "g", "k", "c", "s", "pro", "max", "plus", "rca"}
+    query_model_codes = []
+    for w in norm_query.split():
+        if w in MODEL_KEYWORDS:
+            query_model_codes.append(w)
+        elif any(c.isalpha() for c in w) and any(c.isdigit() for c in w):
+            is_spec_word = False
+            for unit in ['v', 'ah', 'w', 'l', 'kg', 'bar', 'mm', 'cm']:
+                if w.endswith(unit) and w[:-len(unit)].replace('.', '').replace(',', '').isdigit():
+                    is_spec_word = True
+                    break
+            if not is_spec_word:
+                query_model_codes.append(w)
+    
+    # 1. Words to match
+    IGNORED = {"seti", "makinesi", "fiyatlari", "+", "-", "ve", "ile", "adet", "icin"}
+    q_words = [w for w in norm_query.split() if len(w) > 2 and w not in IGNORED]
+    
+    # 2. Numbers to match
+    def extract_smart_nums(text):
+        nums = re.findall(r"\d+-\d+|\d+", text)
+        all_parts = set(nums)
+        for n in nums:
+            if '-' in n: all_parts.update(n.split('-'))
+        return {n for n in all_parts if len(n) > 1 or (n.isdigit() and int(n) > 5)}
+
+    query_nums = extract_smart_nums(clean_query)
+    
+    # 3. Specs to match
+    def extract_specs(text):
+        def norm(val):
+            if not val: return None
+            try: return str(float(val.replace(",", "."))).replace(".0", "")
+            except: return None
+        res = {
+            "v": {norm(x) for x in re.findall(r"(\d+[\.,]\d+|\d+)\s*v", text)},
+            "ah": {norm(x) for x in re.findall(r"(\d+[\.,]\d+|\d+)\s*ah", text)},
+            "w": {norm(x) for x in re.findall(r"(\d+[\.,]\d+|\d+)\s*w", text)},
+            "l": {norm(x) for x in re.findall(r"(\d+[\.,]\d+|\d+)\s*l", text)},
+            "kg": {norm(x) for x in re.findall(r"(\d+[\.,]\d+|\d+)\s*kg", text)},
+            "bar": {norm(x) for x in re.findall(r"(\d+[\.,]\d+|\d+)\s*bar", text)},
+        }
+        qty_raw = re.findall(r"(\d+)\s*[xX*]|(\d+)\s*adet", text)
+        res["qty"] = {norm(x) for tup in qty_raw for x in tup if x}
+        for k in res: res[k].discard(None)
+        return res
+
+    q_specs = extract_specs(norm_query)
+    clean_brand = brand.lower().strip() if brand else ""
     
     best_candidate = None
     highest_score = -1
-    
-    clean_query = query.lower().strip()
-    
-    # If brand is not provided, try to extract it from the query
-    # We'll check for common brands in the query to enforce matching
-    common_brands = ["bosch", "ryobi", "einhell", "makita", "dewalt", "stanley", "black+decker", "milwaukee", "stihl", "husqvarna"]
-    clean_brand = brand.lower().strip() if brand else ""
-    if not clean_brand:
-        for b in common_brands:
-            if b in clean_query:
-                clean_brand = b
-                break
-    
-    # Model patterns - improved to handle variations and case sensitivity
-    model_pattern = r"([A-Z]{1,}\s?\d+-\d+|[A-Z]{1,}-\d+|[A-Z]{1,}\d+-\d+|[A-Z]{1,}\d+[A-Z]{1,}-\d+|[A-Z]{1,}\s?\d+/\d+|\d+\.\d+\s?Ah|\d+\s?Ah|\d+\s?V|\d+V|\d+X\d+\.\d+AH|\d+X\d+AH)"
-    query_models = re.findall(model_pattern, clean_query.upper())
-    
-    # Check if user is specifically searching for an accessory
-    is_query_accessory = any(n in clean_query for n in NEGATIVES)
-    
+
     for cand in candidates:
         title = cand['title'].lower().strip()
-        url = cand['url'].lower()
+        norm_title = normalize_match_text(title)
         
-        # 3. Smart Word-by-Word Analysis (Deep Match)
-        # Ensure most non-brand words from query are in title
-        query_words = [w for w in clean_query.split() if len(w) > 2 and w != clean_brand]
-        title_words = [w for w in title.split()]
+        # --- SMART WORD COVERAGE CHECK ---
+        match_count = sum(1 for qw in q_words if qw in norm_title)
+        coverage = match_count / len(q_words) if q_words else 1.0
+        if coverage < 0.75: continue
         
-        match_count = 0
-        for qw in query_words:
-            if any(qw in tw for tw in title_words):
-                match_count += 1
-                
-        # If less than 50% of specific words match, penalize or skip
-        # This prevents "Anahtar" query matching "Kurutma" title
-        if query_words and (match_count / len(query_words)) < 0.5:
-            continue 
-        
-        # 1. Brand Enforcement: If brand is detected/provided, it MUST be in the title
-        if clean_brand and clean_brand not in title:
-            alt_brand = clean_brand.replace("+", " ").replace("-", " ")
-            if alt_brand not in title:
-                continue
-            
-        # 2. Tech Match Enforcement (Specifically for Cimri's technical errors)
-        if force_tech_match:
-            try:
-                def get_important_floats(text):
-                    nums = re.findall(r"\d+\.\d+|\d+", text.lower())
-                    return {float(n) for n in nums if float(n) > 2.0}
-                
-                query_floats = get_important_floats(clean_query)
-                title_floats = get_important_floats(title)
-                
-                if not query_floats.issubset(title_floats):
-                    continue
-            except:
-                pass
+        # --- ABSOLUTE BRAND CHECK ---
+        if clean_brand and clean_brand not in norm_title:
+            continue
 
-        # 3. Accessory/Part Check
-        is_title_accessory = any(n in title for n in NEGATIVES)
-        accessory_penalty = 0
-        if is_title_accessory and not is_query_accessory:
-            accessory_penalty = 60 # Increased penalty
-        elif not is_title_accessory and is_query_accessory:
-            accessory_penalty = 20 
-            
-        # 4. Similarity Score
-        score = fuzz.token_set_ratio(clean_query, title)
-        score -= accessory_penalty
-        
-        # 5. Model Number Check (Important boost)
-        model_match = any(m in title.upper() for m in query_models) if query_models else True
-        
-        if model_match:
-            score += 40 
-        else:
-            score -= 10
+        # --- STRICT MODEL CODE CHECK ---
+        model_code_fail = False
+        t_words = norm_title.split()
+        title_no_spaces = norm_title.replace(" ", "")
+        for mc in query_model_codes:
+            found = False
+            for tw in t_words:
+                if tw == mc:
+                    found = True
+                    break
+                if mc.isalpha() and tw.endswith(mc) and tw[:-len(mc)].isdigit():
+                    found = True
+                    break
+            if not found and len(mc) > 3 and mc in title_no_spaces:
+                found = True
+            if not found:
+                model_code_fail = True
+                break
+        if model_code_fail: continue
+
+        # --- SMART NUMERIC CHECK ---
+        title_nums = extract_smart_nums(title)
+        num_fail = False
+        raw_title_no_spaces = title.replace(" ", "").replace("-", "")
+        for qn in query_nums:
+            if qn not in title_nums and qn not in raw_title_no_spaces:
+                if len(qn) > 2: num_fail = True; break
+                continue
+        if num_fail: continue
+
+        # --- ABSOLUTE SPEC CHECK ---
+        t_specs = extract_specs(norm_title)
+        spec_fail = False
+        spec_match_bonus = 0
+        for unit, q_vals in q_specs.items():
+            if q_vals:
+                if not q_vals.issubset(t_specs[unit]):
+                    spec_fail = True; break
+                spec_match_bonus += 25 
+        if spec_fail: continue
+
+        # --- FINAL SCORE ---
+        score = fuzz.token_set_ratio(norm_query, norm_title)
+        score += spec_match_bonus
             
         if score > highest_score:
             highest_score = score
             best_candidate = cand['url']
             
-    if highest_score >= threshold:
-        return best_candidate
+    if highest_score >= threshold: return best_candidate
     return None
 
 async def extract_candidates(page):
     """Universal extractor for search results."""
-    candidates = []
-    
-    # Method 1: Look for product titles in the main results container
-    # For Cimri, we want to avoid 'Son Gezdiklerin' or 'Popüler Ürünler' sections.
-    # We select elements that are NOT inside recommendation sections.
-    elements = await page.query_selector_all("h2, h3, .product-name, .title")
-    for el in elements:
-        try:
-            # Improved 'is_ignored' check to avoid skipping the entire page
-            is_ignored = await page.evaluate("""(el) => {
-                const ignoredKeywords = ['son gezdiklerin', 'popüler ürünler', 'sizin için seçtiklerimiz', 'benzer ürünler'];
-                let parent = el.parentElement;
-                while (parent && parent.tagName !== 'BODY') {
-                    // Check if this specific parent is a recommendation section by looking for its header
-                    const h = parent.querySelector('h1, h2, h3');
-                    if (h && h !== el) {
-                        const hText = h.innerText.toLowerCase();
-                        if (ignoredKeywords.some(k => hText.includes(k))) return true;
-                    }
-                    if (parent.classList.contains('recommendation') || parent.id.includes('recommendation')) return true;
-                    parent = parent.parentElement;
+    return await page.evaluate("""() => {
+        const results = [];
+        const elements = document.querySelectorAll("h2, h3, .product-name, [class*='title'], [class*='ProductTitle']");
+        elements.forEach(el => {
+            const title = el.innerText.trim();
+            if (title.length < 5) return;
+            let a = el.closest('a') || el.querySelector('a');
+            if (!a) {
+                const card = el.closest('div, li, article, [class*="ProductCard"]');
+                if (card) {
+                    a = card.querySelector('a[href*="/en-ucuz-"], a[href*="/product/"], a[href*="/market/"]') || card.querySelector('a[href]');
                 }
-                return false;
-            }""", el)
-            
-            title = await el.inner_text()
-            title = title.strip()
-            
-            if is_ignored:
-                # print(f"DEBUG: Ignoring element {title} because it's in a recommendations section.")
-                continue
+            }
+            if (a && a.getAttribute('href')) {
+                results.push({title, url: a.getAttribute('href')});
+            }
+        });
+        return results;
+    }""")
 
-            if not title or len(title) < 5: continue
-            
-            # Find the href. Try parent, then siblings, then children of the card container
-            href = None
-            parent_a = await el.query_selector("xpath=./ancestor::a")
-            if parent_a:
-                href = await parent_a.get_attribute("href")
-            
-            if not href:
-                # Look for any link in the same parent container that looks like a product page
-                parent_card = await el.evaluate_handle("el => el.closest('div, li, article')")
-                if parent_card:
-                    # Cimri specific product link patterns
-                    link_el = await parent_card.query_selector("a[href*='/en-ucuz-'], a[href*='/category/'], a[href*='/product/']")
-                    if link_el:
-                        href = await link_el.get_attribute("href")
-            
-            if not href:
-                # Last resort: check immediate siblings
-                parent_div = await el.query_selector("xpath=./..")
-                if parent_div:
-                    link_el = await parent_div.query_selector("a")
-                    if link_el:
-                        href = await link_el.get_attribute("href")
-            
-            if href:
-                # Filter out direct external store links
-                if "cimri.com" not in href and "http" in href: 
-                    continue
-                
-                # Cimri ID Pattern Check: Real products have a unique numeric ID after a comma 
-                # (e.g. ,2205175232). Categories like 'çamaşır-kurutma-makineleri' DO NOT.
-                if "cimri.com" in href or href.startswith("/"):
-                    # Check if URL ends with comma and at least 5 digits
-                    if not re.search(r",\d{5,}", href):
-                        # print(f"DEBUG: Skipping category page: {href}")
-                        continue
-                        
-                candidates.append({"title": title, "url": href})
-                # print(f"DEBUG: Found candidate: {title} -> {href}")
-        except Exception as e:
-            # print(f"DEBUG Error in extract_candidates: {e}")
-            continue
-            
-    # Method 2: Specific fallback for Cimri-like card structures
-    if not candidates:
-        # Only look for product links that look like Cimri internal product pages
-        all_links = await page.query_selector_all("a[href*='/en-ucuz-']")
-        for link in all_links:
-            try:
-                title = await link.inner_text()
-                href = await link.get_attribute("href")
-                if title and len(title.strip()) > 10 and href:
-                    candidates.append({"title": title.strip(), "url": href})
-            except:
-                continue
-                
-    return candidates
-
-async def follow_akakce_suggestions(page):
-    """Follows suggestions if no results."""
-    suggestion_selectors = [
-        "a:has-text('için de sonuçlar gösteriliyor')",
-        "a:has-text('İlgili kategoriye git')",
-        ".no-result a"
-    ]
-    for sel in suggestion_selectors:
-        try:
-            link = await page.query_selector(sel)
-            if link:
-                await link.click()
-                await page.wait_for_load_state("networkidle")
-                return True
-        except:
-            continue
-    return False
-
-async def agentic_search_akakce(name, brand, page_or_context):
-    if not page_or_context:
-        # If no context is provided, we can't continue without breaking the flow
-        # But we previously fixed main.py to always provide it.
-        # Still, adding a fallback for safety.
-        print("Error: No browser page or context provided to agentic_search_akakce")
-        return None
-
-    if hasattr(page_or_context, 'new_page'):
-        page = await page_or_context.new_page()
-    else:
-        page = page_or_context
-
-    # Smart search stages to avoid "Bosch Bosch" duplication
-    base_name = clean_name(name)
-    brand_lower = brand.lower().strip() if brand else ""
-    
-    search_stages = [name]
-    
-    if brand_lower and brand_lower not in base_name.lower():
-        search_stages.append(f"{brand} {base_name}")
-    else:
-        search_stages.append(base_name)
-
-    # Remove duplicates
-    search_stages = list(dict.fromkeys(search_stages))
-
-    for stage_query in search_stages:
-        search_url = f"https://www.akakce.com/arama/?q={urllib.parse.quote(stage_query)}"
-        try:
-            # Random delay before navigation
-            await human_delay(300, 800)
-            await page.goto(search_url, timeout=45000, wait_until="domcontentloaded")
-            
-            # Additional scroll to look human
-            await page.mouse.wheel(0, 500)
-            await human_delay(200, 500)
-        except Exception as e:
-            print(f"Akakce error for {stage_query}: {e}")
-        
-        candidates = await extract_candidates(page)
-        if not candidates:
-            if await follow_akakce_suggestions(page):
-                candidates = await extract_candidates(page)
-        
-        for c in candidates:
-            if not c['url'].startswith("http"):
-                c['url'] = f"https://www.akakce.com{c['url']}"
-        
-        result = find_best_match(name, brand, candidates)
-        if result: 
-            if hasattr(page_or_context, 'new_page'): await page.close()
-            return result
-    
-    # Broad fallback
-    words = name.split()
-    if len(words) > 3:
-        broad_query = " ".join(words[:4])
-        search_url = f"https://www.akakce.com/arama/?q={urllib.parse.quote(broad_query)}"
-        try:
-            await page.goto(search_url, timeout=30000, wait_until="domcontentloaded")
-            candidates = await extract_candidates(page)
-            for c in candidates:
-                if not c['url'].startswith("http"): c['url'] = f"https://www.akakce.com{c['url']}"
-            result = find_best_match(name, brand, candidates, threshold=40)
-            if result:
-                if hasattr(page_or_context, 'new_page'): await page.close()
-                return result
-        except:
-            pass
-
-    if hasattr(page_or_context, 'new_page'): await page.close()
-    return None
-
-async def agentic_search_cimri(name, brand, page_or_context):
-    if not page_or_context:
-        print("Error: No browser page or context provided to agentic_search_cimri")
-        return None
-
-    if hasattr(page_or_context, 'new_page'):
-        page = await page_or_context.new_page()
-    else:
-        page = page_or_context
-    
-    # 1. First Attempt: Use direct input if possible (more reliable for special chars)
+async def agentic_search_akakce(name, brand, page_or_context, lenient=False):
+    name = cleanup_text(name)
+    if hasattr(page_or_context, 'new_page'): page = await page_or_context.new_page()
+    else: page = page_or_context
+    search_url = f"https://www.akakce.com/arama/?q={urllib.parse.quote(name)}"
     try:
-        await page.goto("https://www.cimri.com", timeout=30000, wait_until="domcontentloaded")
-        search_box = await page.query_selector("input[placeholder*='ara'], input#search-input, .search-input")
-        if search_box:
-            await search_box.fill(name)
-            await search_box.press("Enter")
-            await page.wait_for_load_state("networkidle", timeout=30000)
-            await page.mouse.wheel(0, 500)
-            await human_delay(500, 1000)
-            
-            candidates = await extract_candidates(page)
-            if candidates:
-                for c in candidates:
-                    if not c['url'].startswith("http"): c['url'] = f"https://www.cimri.com{c['url']}"
-                result = find_best_match(name, brand, candidates, threshold=35, force_tech_match=True)
-                if result:
-                    if hasattr(page_or_context, 'new_page'): await page.close()
-                    return result
-    except Exception as e:
-        print(f"Cimri direct search failed, falling back to URL search: {e}")
+        await page.goto(search_url, timeout=30000, wait_until="domcontentloaded")
+        candidates = await extract_candidates(page)
+        for c in candidates:
+            if not c['url'].startswith("http"): c['url'] = f"https://www.akakce.com{c['url']}"
+        res = find_best_match(name, brand, candidates)
+        if hasattr(page_or_context, 'new_page'): await page.close()
+        return res
+    except:
+        if hasattr(page_or_context, 'new_page'): await page.close()
+        return None
 
-    # 2. Fallback: Search Stages via URL
-    base_name = clean_name(name)
-    brand_lower = brand.lower().strip() if brand else ""
+async def agentic_search_cimri(name, brand, page_or_context, lenient=False):
+    name = cleanup_text(name)
+    brand = cleanup_text(brand) if brand else ""
     
-    search_stages = [name]
-    if brand_lower and brand_lower not in base_name.lower():
-        search_stages.append(f"{brand} {base_name}")
+    if hasattr(page_or_context, 'new_page'):
+        context = page_or_context
     else:
-        search_stages.append(base_name)
+        context = page_or_context.context
     
-    # Stage 3: Remove special characters like '+' and '/' that might confuse search
-    clean_plus = re.sub(r'[\+\/]', ' ', name)
-    if clean_plus != name:
-        search_stages.append(clean_plus)
+    model_num = "".join(re.findall(r"\d+", name))
+    search_queries = [name]
+    
+    model_match = re.search(r"([A-Z]{1,}\d+-\d+|[A-Z]{1,}-\d+|[A-Z]{1,}\d+|\d+-\d+|\d+)", name.upper())
+    if model_match:
+        model_part = model_match.group(1)
+        search_queries.append(f"{brand} {model_part}")
         
-    search_stages = list(dict.fromkeys(search_stages))
+    only_nums = "".join(re.findall(r"\d+", name))
+    if only_nums and len(only_nums) >= 2:
+        search_queries.append(f"{brand} {only_nums}")
+        
+    clean_core = re.sub(r"\d+\s*hp|\d+\s*v|\d+\s*ah|benzinli|dizel|capa makinesi|elektrikli|islak|kuru", "", name, flags=re.I).strip()
+    if clean_core and clean_core != name:
+        search_queries.append(f"{brand} {clean_core}")
 
-    for stage_query in search_stages:
+    search_queries = list(dict.fromkeys(search_queries))
+
+    async def fetch_stage(stage_query):
         try:
-            search_url = f"https://www.cimri.com/arama?q={urllib.parse.quote(stage_query)}"
-            await human_delay(400, 1000)
-            # Use networkidle for Cimri as it loads results dynamically
-            await page.goto(search_url, timeout=45000, wait_until="networkidle")
-            await page.mouse.wheel(0, 500)
-            await human_delay(500, 1000)
-            
-            candidates = await extract_candidates(page)
-            # Fallback for Cimri specific card links
-            if not candidates:
-                # Find all links that look like product pages
-                links = await page.query_selector_all("a[href*='/en-ucuz-']")
-                for link in links:
-                    title = await link.inner_text()
-                    href = await link.get_attribute("href")
-                    if title and href:
-                        candidates.append({"title": title.strip(), "url": href})
-
-            for c in candidates:
-                if not c['url'].startswith("http"): c['url'] = f"https://www.cimri.com{c['url']}"
-            
-            result = find_best_match(name, brand, candidates, threshold=35)
-            if result: 
-                if hasattr(page_or_context, 'new_page'): await page.close()
-                return result
+            stage_page = await context.new_page()
         except Exception as e:
-            print(f"Cimri error for {stage_query}: {e}")
-            continue
+            print(f"Error creating new page in fetch_stage: {e}")
+            return []
+            
+        search_url = f"https://www.cimri.com/arama?q={urllib.parse.quote(stage_query)}"
+        try:
+            await stage_page.goto(search_url, timeout=30000, wait_until="domcontentloaded")
+            await asyncio.sleep(1.5)
+            candidates = await extract_candidates(stage_page)
+            for c in candidates:
+                if not c['url'].startswith("http"):
+                    c['url'] = f"https://www.cimri.com{c['url']}"
+            await stage_page.close()
+            return candidates
+        except Exception as e:
+            print(f"Error in fetch_stage: {e}")
+            await stage_page.close()
+            return []
 
-    if hasattr(page_or_context, 'new_page'): await page.close()
-    return None
+    fetch_tasks = [fetch_stage(sq) for sq in search_queries]
+    results = await asyncio.gather(*fetch_tasks)
+    
+    all_candidates = []
+    for cands in results:
+        all_candidates.extend(cands)
+        
+    res = find_best_match(name, brand, all_candidates)
+    return res
 
-async def search_product(source: str, query: str, brand: str = "", page_or_context=None):
+async def search_product(source: str, query: str, brand: str = "", page_or_context=None, lenient=False):
     if source.lower() == "akakce":
-        return await agentic_search_akakce(query, brand, page_or_context)
+        return await agentic_search_akakce(query, brand, page_or_context, lenient)
     elif source.lower() == "cimri":
-        return await agentic_search_cimri(query, brand, page_or_context)
+        return await agentic_search_cimri(query, brand, page_or_context, lenient)
     return None
-    return None
-
-
