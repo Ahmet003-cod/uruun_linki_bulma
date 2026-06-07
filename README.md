@@ -87,6 +87,9 @@ Python kütüphanelerini ve Playwright tarayıcısını kurun:
 ```bash
 cd backend
 pip install -r requirements.txt
+# (Alternatif olarak tek satırda kurmak için:)
+# pip install fastapi uvicorn pandas openpyxl httpx beautifulsoup4 playwright python-multipart python-dotenv thefuzz python-Levenshtein
+
 playwright install chromium
 cd ..
 ```

@@ -79,8 +79,8 @@ async def process_excel_task(job_id: str, source: str, contents: bytes):
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-setuid-sandbox"])
             
             # --- CONCURRENCY CONTROL ---
-            # Max 8 concurrent searches to balance speed and bot detection
-            MAX_CONCURRENT = 8
+            # Max 3 concurrent searches to balance speed and bot detection
+            MAX_CONCURRENT = 3
             semaphore = asyncio.Semaphore(MAX_CONCURRENT)
             
             async def process_row_task(index, row, pass_num=1):
